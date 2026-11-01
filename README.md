@@ -24,39 +24,15 @@ flowchart LR
     svc -- "Step 4: ready Pods only" --> p2
 ```
 
-How a request flows:
-
-1. The client only knows the name `inventory`, so it asks cluster DNS for it.
-2. DNS answers with the Service's IP. This IP never changes, even when Pods do.
-3. The client sends its request to the Service.
-4. The Service passes the request to one of the Pods behind it, but only to Pods that are passing their readiness check.
-
-Two things happen in the background:
-
-- Kubernetes calls `/ready` on each Pod every 2 seconds. If a Pod returns an error, it is taken out of the Service until it is healthy again.
-- The Deployment always keeps 2 Pods running. If one is deleted, a new one is created and the Service starts using it right away.
-
-### Files
-
-| File | What it does |
-|---|---|
-| `inventory/app.py` | The Inventory service. `/inventory` returns the stock along with the name and IP of the Pod that answered. `/ready` returns 503 if the file `/tmp/unready` exists, otherwise 200. |
-| `client/client.py` | Calls `http://inventory:8080/inventory` every second and logs which Pod answered. Every 10 requests it prints a count per Pod. |
-| `k8s/inventory.yaml` | Deployment with 2 replicas and a readiness probe on `/ready`, plus the `inventory` Service. |
-| `k8s/client.yaml` | Deployment for the client. |
-| `scripts/` | Deploy, cleanup, and one script for each test. |
-
-One small detail: the client opens a new connection for each request. Kubernetes picks a Pod when a connection is opened, so if the client reused one connection, every request would go to the same Pod and you would never see the load being shared.
-
 ## How to run it
 
-You need Docker, `kubectl` and `kind` (`brew install kind`). minikube or Docker Desktop also work, you just load the images differently.
+You need Docker, `kubectl` and `kind` (`brew install kind`). Then run:
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-This creates a kind cluster called `module6`, builds both images, loads them into the cluster and applies the YAML files. If you'd rather do it step by step:
+This creates a kind cluster called `module6`, builds both images, loads them into the cluster and applies the YAML files. The same steps by hand:
 
 ```bash
 kind create cluster --name module6
@@ -67,12 +43,6 @@ kubectl apply -f k8s/inventory.yaml
 kubectl apply -f k8s/client.yaml
 ```
 
-To watch the client live:
-
-```bash
-kubectl logs -f deployment/client
-```
-
 Each test has its own script. It prints every command it runs and saves the output in `evidence/`:
 
 | Test | Script | Output |
@@ -80,22 +50,6 @@ Each test has its own script. It prints every command it runs and saves the outp
 | Discovery and load sharing | `./scripts/test_discovery.sh` | [evidence/1_discovery_and_load_balancing.txt](evidence/1_discovery_and_load_balancing.txt) |
 | Readiness failure and recovery | `./scripts/test_readiness.sh` | [evidence/2_readiness_failure_and_recovery.txt](evidence/2_readiness_failure_and_recovery.txt) |
 | Pod deletion and replacement | `./scripts/test_pod_failure.sh` | [evidence/3_pod_deletion_and_replacement.txt](evidence/3_pod_deletion_and_replacement.txt) |
-
-You can also make a Pod unready by hand, and then bring it back:
-
-```bash
-kubectl exec <inventory-pod> -- touch /tmp/unready
-```
-
-```bash
-kubectl exec <inventory-pod> -- rm /tmp/unready
-```
-
-When you're done:
-
-```bash
-./scripts/cleanup.sh
-```
 
 ## 1. Deployment and service discovery
 

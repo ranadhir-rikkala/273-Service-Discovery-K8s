@@ -33,9 +33,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path == "/healthz":
-            self.send_json(200, {"status": "alive"})
-        elif self.path == "/ready":
+        if self.path == "/ready":
             if os.path.exists(UNREADY_FLAG):
                 self.send_json(503, {"status": "not ready", "pod": POD_NAME})
             else:
@@ -43,13 +41,6 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/inventory":
             log(f"served /inventory to {self.client_address[0]}")
             self.send_json(200, {"pod": POD_NAME, "pod_ip": POD_IP, "stock": STOCK})
-        elif self.path.startswith("/inventory/"):
-            item = self.path.split("/", 2)[2]
-            log(f"served /inventory/{item} to {self.client_address[0]}")
-            if item in STOCK:
-                self.send_json(200, {"pod": POD_NAME, "item": item, "quantity": STOCK[item]})
-            else:
-                self.send_json(404, {"pod": POD_NAME, "error": f"unknown item {item}"})
         else:
             self.send_json(404, {"error": "not found"})
 

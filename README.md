@@ -1,40 +1,62 @@
 # CMPE 273 - Module 6: Service Discovery, Readiness & Recovery
 
-An Inventory service running as 2 replicas behind a Kubernetes Service, plus a client that calls it by the Service name `inventory`. Both are small Python programs (standard library only) running on a local [kind](https://kind.sigs.k8s.io/) cluster.
+For this lab I deployed a small Inventory service on Kubernetes with 2 replicas, put a Service in front of it, and ran a client that keeps calling it by name. Then I broke things on purpose: first by making one Pod unready, then by deleting a Pod. The client never changes its URL or restarts during these tests.
+
+Everything runs on a local [kind](https://kind.sigs.k8s.io/) cluster. The service and the client are both short Python scripts that only use the standard library.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    C[client Pod<br/>GET http://inventory:8080/inventory<br/>every 1 s] -- "DNS: inventory" --> D[(CoreDNS)]
-    D -- "10.96.211.140" --> C
-    C --> S[Service: inventory<br/>ClusterIP 10.96.211.140:8080]
-    S -- "ready endpoint" --> P1[inventory Pod 1]
-    S -- "ready endpoint" --> P2[inventory Pod 2]
-    K[kubelet] -. "readinessProbe GET /ready every 2 s" .-> P1
-    K -. "readinessProbe GET /ready every 2 s" .-> P2
-    RS[ReplicaSet<br/>replicas: 2] -. "recreates deleted Pods" .-> P1
-    RS -.-> P2
+    client["Client Pod<br/>calls inventory:8080<br/>once a second"]
+    dns[("Cluster DNS")]
+    svc{{"Service: inventory<br/>10.96.211.140"}}
+    subgraph deploy["Deployment: inventory"]
+        direction TB
+        p1["Inventory Pod A"]
+        p2["Inventory Pod B"]
+    end
+
+    client -- "Step 1: look up inventory" --> dns
+    dns -- "Step 2: 10.96.211.140" --> client
+    client -- "Step 3: GET /inventory" --> svc
+    svc -- "Step 4: ready Pods only" --> p1
+    svc -- "Step 4: ready Pods only" --> p2
 ```
 
-| Component | File | What it does |
-|---|---|---|
-| Inventory service | `inventory/app.py` | `GET /inventory` returns stock plus the Pod name and IP that answered. `GET /ready` returns 503 while `/tmp/unready` exists, otherwise 200. `GET /healthz` is the liveness check. |
-| Client | `client/client.py` | Calls `http://inventory:8080/inventory` once a second, logs which Pod answered, and prints a count per Pod every 10 requests. |
-| Deployment + Service | `k8s/inventory.yaml` | 2 replicas, readiness probe (`/ready`, period 2 s, failure threshold 1), liveness probe, ClusterIP Service `inventory` selecting `app=inventory`. |
-| Client Deployment | `k8s/client.yaml` | 1 replica, `INVENTORY_URL=http://inventory:8080/inventory`. |
+How a request flows:
 
-The client opens a new connection for every request. kube-proxy picks a backend per connection, so a reused keep-alive connection would always land on the same Pod.
+1. The client only knows the name `inventory`, so it asks cluster DNS for it.
+2. DNS answers with the Service's IP. This IP never changes, even when Pods do.
+3. The client sends its request to the Service.
+4. The Service passes the request to one of the Pods behind it, but only to Pods that are passing their readiness check.
 
-## Deploying
+Two things happen in the background:
 
-Requirements: Docker, `kubectl`, and `kind` (`brew install kind`). minikube or Docker Desktop Kubernetes also work; only the image-loading step changes.
+- Kubernetes calls `/ready` on each Pod every 2 seconds. If a Pod returns an error, it is taken out of the Service until it is healthy again.
+- The Deployment always keeps 2 Pods running. If one is deleted, a new one is created and the Service starts using it right away.
+
+### Files
+
+| File | What it does |
+|---|---|
+| `inventory/app.py` | The Inventory service. `/inventory` returns the stock along with the name and IP of the Pod that answered. `/ready` returns 503 if the file `/tmp/unready` exists, otherwise 200. |
+| `client/client.py` | Calls `http://inventory:8080/inventory` every second and logs which Pod answered. Every 10 requests it prints a count per Pod. |
+| `k8s/inventory.yaml` | Deployment with 2 replicas and a readiness probe on `/ready`, plus the `inventory` Service. |
+| `k8s/client.yaml` | Deployment for the client. |
+| `scripts/` | Deploy, cleanup, and one script for each test. |
+
+One small detail: the client opens a new connection for each request. Kubernetes picks a Pod when a connection is opened, so if the client reused one connection, every request would go to the same Pod and you would never see the load being shared.
+
+## How to run it
+
+You need Docker, `kubectl` and `kind` (`brew install kind`). minikube or Docker Desktop also work, you just load the images differently.
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-This creates a kind cluster called `module6` (if needed), builds both images, loads them into the cluster, and applies the manifests. The same steps by hand:
+This creates a kind cluster called `module6`, builds both images, loads them into the cluster and applies the YAML files. If you'd rather do it step by step:
 
 ```bash
 kind create cluster --name module6
@@ -45,23 +67,21 @@ kubectl apply -f k8s/inventory.yaml
 kubectl apply -f k8s/client.yaml
 ```
 
-Watch the client:
+To watch the client live:
 
 ```bash
 kubectl logs -f deployment/client
 ```
 
-## Running the tests
+Each test has its own script. It prints every command it runs and saves the output in `evidence/`:
 
-Each script prints the commands it runs and saves the output to `evidence/`.
+| Test | Script | Output |
+|---|---|---|
+| Discovery and load sharing | `./scripts/test_discovery.sh` | [evidence/1_discovery_and_load_balancing.txt](evidence/1_discovery_and_load_balancing.txt) |
+| Readiness failure and recovery | `./scripts/test_readiness.sh` | [evidence/2_readiness_failure_and_recovery.txt](evidence/2_readiness_failure_and_recovery.txt) |
+| Pod deletion and replacement | `./scripts/test_pod_failure.sh` | [evidence/3_pod_deletion_and_replacement.txt](evidence/3_pod_deletion_and_replacement.txt) |
 
-| Script | Evidence |
-|---|---|
-| `./scripts/test_discovery.sh` | [evidence/1_discovery_and_load_balancing.txt](evidence/1_discovery_and_load_balancing.txt) |
-| `./scripts/test_readiness.sh` | [evidence/2_readiness_failure_and_recovery.txt](evidence/2_readiness_failure_and_recovery.txt) |
-| `./scripts/test_pod_failure.sh` | [evidence/3_pod_deletion_and_replacement.txt](evidence/3_pod_deletion_and_replacement.txt) |
-
-Readiness can also be toggled by hand:
+You can also make a Pod unready by hand, and then bring it back:
 
 ```bash
 kubectl exec <inventory-pod> -- touch /tmp/unready
@@ -71,7 +91,7 @@ kubectl exec <inventory-pod> -- touch /tmp/unready
 kubectl exec <inventory-pod> -- rm /tmp/unready
 ```
 
-Cleanup:
+When you're done:
 
 ```bash
 ./scripts/cleanup.sh
@@ -79,7 +99,7 @@ Cleanup:
 
 ## 1. Deployment and service discovery
 
-Both replicas are running and both are ready endpoints of the `inventory` Service:
+Both Inventory Pods are up, and both are listed as ready behind the `inventory` Service:
 
 ```
 $ kubectl get pods -o wide
@@ -97,7 +117,7 @@ inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=true
 inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
 ```
 
-The client is configured with the Service name only, and cluster DNS resolves that name to the Service's ClusterIP, not to a Pod IP:
+The client is only given the Service name. Inside the client Pod, that name resolves to the Service IP, not to any Pod's IP:
 
 ```
 $ kubectl get deployment client -o jsonpath={.spec.template.spec.containers[0].env[0]}
@@ -108,9 +128,9 @@ inventory -> 10.96.211.140
 inventory.default.svc.cluster.local -> 10.96.211.140
 ```
 
-## 2. Both replicas receive requests
+## 2. Both replicas get requests
 
-Requests to the same Service name are answered by both Pods ([full output](evidence/1_discovery_and_load_balancing.txt)):
+The client always calls the same name, but the answers come from both Pods ([full output](evidence/1_discovery_and_load_balancing.txt)):
 
 ```
 $ kubectl logs deployment/client --since=20s
@@ -127,7 +147,7 @@ $ kubectl logs deployment/client --since=20s
 18:52:38.756 [client] last 10 requests: {'inventory-6cd7699d6d-dq4dh': 6, 'inventory-6cd7699d6d-fgbl8': 4}
 ```
 
-Each replica's own log confirms it served the client (`10.244.0.16`):
+The logs on each Pod show the same thing from the other side. Both Pods are serving the client at `10.244.0.16`:
 
 ```
 $ kubectl logs inventory-6cd7699d6d-dq4dh --tail=2
@@ -141,14 +161,14 @@ $ kubectl logs inventory-6cd7699d6d-fgbl8 --tail=2
 
 ## 3. Readiness failure and recovery
 
-`inventory-6cd7699d6d-dq4dh` is made unready by creating `/tmp/unready`, which makes its `/ready` endpoint return 503 ([full output](evidence/2_readiness_failure_and_recovery.txt)):
+To make `inventory-6cd7699d6d-dq4dh` fail its readiness check, I created `/tmp/unready` inside it. Its `/ready` endpoint now returns 503 ([full output](evidence/2_readiness_failure_and_recovery.txt)):
 
 ```
 $ kubectl exec inventory-6cd7699d6d-dq4dh -- touch /tmp/unready
 GET /ready -> HTTP Error 503: Service Unavailable
 ```
 
-The Pod is still `Running` with 0 restarts, but it is `0/1` ready and the Service marks its endpoint `ready=false`:
+A few seconds later the Pod is still `Running` with 0 restarts, so Kubernetes did not kill it. But it shows `0/1` ready, and the Service has marked it `ready=false`:
 
 ```
 $ kubectl get pods -l app=inventory -o wide
@@ -165,7 +185,7 @@ LAST SEEN   TYPE      REASON      OBJECT                           MESSAGE
 1s          Warning   Unhealthy   pod/inventory-6cd7699d6d-dq4dh   Readiness probe failed: HTTP probe failed with statuscode: 503
 ```
 
-For the next 20 seconds every request is served by the ready Pod, with no errors, and the unready Pod serves nothing:
+For the next 20 seconds, every request goes to the healthy Pod and none of them fail. The unready Pod doesn't get a single request:
 
 ```
 $ kubectl logs deployment/client --since=20s
@@ -181,7 +201,7 @@ $ kubectl logs inventory-6cd7699d6d-dq4dh --since=20s | grep -c served
 0
 ```
 
-Readiness is restored by removing the file. The Pod is ready again (still 0 restarts) and receives traffic again:
+Then I deleted the file. The Pod passes the check again, it is still the same Pod with 0 restarts, and it starts getting traffic again:
 
 ```
 $ kubectl exec inventory-6cd7699d6d-dq4dh -- rm /tmp/unready
@@ -205,7 +225,7 @@ $ kubectl logs deployment/client --since=20s
 
 ## 4. Pod deletion and replacement
 
-`inventory-6cd7699d6d-dq4dh` is deleted. The ReplicaSet immediately creates `inventory-6cd7699d6d-m58p7`, which has a new name and a new IP ([full output](evidence/3_pod_deletion_and_replacement.txt)):
+Next I deleted `inventory-6cd7699d6d-dq4dh`. Kubernetes created `inventory-6cd7699d6d-m58p7` straight away to replace it. The new Pod has a different name and a different IP ([full output](evidence/3_pod_deletion_and_replacement.txt)):
 
 ```
 $ kubectl delete pod inventory-6cd7699d6d-dq4dh
@@ -227,14 +247,16 @@ $ kubectl get events --field-selector involvedObject.name=inventory-6cd7699d6d,r
 6s          Normal   SuccessfulCreate   replicaset/inventory-6cd7699d6d   Created pod: inventory-6cd7699d6d-m58p7
 ```
 
+What changed and what didn't:
+
 | | Before | After |
 |---|---|---|
-| Deleted / new Pod | `inventory-6cd7699d6d-dq4dh` (10.244.0.14) | `inventory-6cd7699d6d-m58p7` (10.244.0.17) |
+| Pod | `inventory-6cd7699d6d-dq4dh` (10.244.0.14) | `inventory-6cd7699d6d-m58p7` (10.244.0.17) |
 | Service name | `inventory` | `inventory` |
-| ClusterIP | 10.96.211.140 | 10.96.211.140 |
+| Service IP | 10.96.211.140 | 10.96.211.140 |
 | Client URL | `http://inventory:8080/inventory` | `http://inventory:8080/inventory` |
 
-The Service is unchanged and its endpoints now list the new Pod:
+The Service itself is untouched. Its endpoint list already has the new Pod in it:
 
 ```
 $ kubectl get service inventory
@@ -246,7 +268,7 @@ inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
 inventory-6cd7699d6d-m58p7  ip=10.244.0.17  ready=true
 ```
 
-The client was not restarted or reconfigured. It kept calling the same Service name, had no failed requests across the deletion, and now reaches the new Pod:
+On the client side nothing changed. It is the same Pod with 0 restarts, still calling the same name. It had no failed requests during the deletion, and it is already getting answers from the new Pod:
 
 ```
 $ kubectl logs deployment/client --since=15s
@@ -266,4 +288,4 @@ $ kubectl logs deployment/client --since=40s | grep -c FAILED
 
 ## Reflection
 
-Pods are temporary: when one fails or is deleted, Kubernetes replaces it with a new Pod that has a different name and IP, so a client that stored Pod addresses would break every time this happens. A Service gives the client one stable name (`inventory`) and one stable ClusterIP that stay the same no matter which Pods are behind it. Kubernetes keeps the Service's endpoint list up to date on its own, adding new Pods, removing deleted ones, and skipping Pods that fail their readiness probe. In this lab the client never changed its URL or restarted, yet it kept getting answers while a Pod was unready and while a Pod was deleted and replaced. This separates "who to call" from "where it is running", which is what lets replicas fail, recover and scale without the client noticing.
+Pods don't last. When one crashes or gets deleted, Kubernetes replaces it with a new Pod that has a new name and a new IP, so a client that saved Pod addresses would break every time. A Service fixes this by giving the client one name and one IP that never change, no matter which Pods are running behind it. Kubernetes keeps the list of Pods behind the Service up to date by itself: new Pods are added, deleted Pods are removed, and Pods that fail their readiness check are skipped. In this lab the client kept getting answers while a Pod was unready and while a Pod was replaced, and I never had to touch its configuration.

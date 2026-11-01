@@ -1,0 +1,103 @@
+### Before: both Pods ready
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-dq4dh   1/1     Running   0          39s   10.244.0.14   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          39s   10.244.0.15   module6-control-plane   <none>           <none>
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=true
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+
+### Make inventory-6cd7699d6d-dq4dh fail readiness (create /tmp/unready so /ready returns 503)
+
+$ kubectl exec inventory-6cd7699d6d-dq4dh -- touch /tmp/unready
+
+$ kubectl exec inventory-6cd7699d6d-dq4dh -- python -c import urllib.request as u
+try: u.urlopen('http://localhost:8080/ready')
+except Exception as e: print('GET /ready ->', e)
+GET /ready -> HTTP Error 503: Service Unavailable
+
+### Pod is still Running (0 restarts) but READY is 0/1
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-dq4dh   0/1     Running   0          45s   10.244.0.14   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          45s   10.244.0.15   module6-control-plane   <none>           <none>
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=false
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+
+$ kubectl get events --field-selector involvedObject.name=inventory-6cd7699d6d-dq4dh,reason=Unhealthy
+LAST SEEN   TYPE      REASON      OBJECT                           MESSAGE
+1s          Warning   Unhealthy   pod/inventory-6cd7699d6d-dq4dh   Readiness probe failed: HTTP probe failed with statuscode: 503
+
+### Client traffic while inventory-6cd7699d6d-dq4dh is unready (20 s): only the ready Pod answers
+
+$ kubectl logs deployment/client --since=20s
+18:52:52.837 [client] #44 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:53.843 [client] #45 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:54.849 [client] #46 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:55.857 [client] #47 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:56.866 [client] #48 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:57.869 [client] #49 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:58.875 [client] #50 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:58.875 [client] last 10 requests: {'inventory-6cd7699d6d-fgbl8': 10}
+18:52:59.883 [client] #51 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:00.888 [client] #52 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:01.895 [client] #53 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:02.904 [client] #54 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:03.909 [client] #55 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:04.916 [client] #56 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:05.921 [client] #57 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:06.927 [client] #58 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:07.933 [client] #59 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:08.939 [client] #60 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:08.939 [client] last 10 requests: {'inventory-6cd7699d6d-fgbl8': 10}
+18:53:09.943 [client] #61 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:10.948 [client] #62 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:11.951 [client] #63 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+
+$ kubectl logs inventory-6cd7699d6d-dq4dh --since=20s | grep -c served
+0
+
+### Restore readiness (remove /tmp/unready)
+
+$ kubectl exec inventory-6cd7699d6d-dq4dh -- rm /tmp/unready
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-dq4dh   1/1     Running   0          72s   10.244.0.14   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          72s   10.244.0.15   module6-control-plane   <none>           <none>
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=true
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+
+### Client traffic after recovery (20 s): both Pods answer again
+
+$ kubectl logs deployment/client --since=20s
+18:53:18.991 [client] #70 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:18.991 [client] last 10 requests: {'inventory-6cd7699d6d-fgbl8': 6, 'inventory-6cd7699d6d-dq4dh': 4}
+18:53:19.998 [client] #71 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:21.002 [client] #72 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:22.007 [client] #73 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:23.015 [client] #74 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:24.021 [client] #75 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:25.026 [client] #76 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:26.033 [client] #77 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:27.040 [client] #78 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:28.048 [client] #79 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:29.051 [client] #80 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:29.051 [client] last 10 requests: {'inventory-6cd7699d6d-fgbl8': 6, 'inventory-6cd7699d6d-dq4dh': 4}
+18:53:30.057 [client] #81 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:31.063 [client] #82 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:32.067 [client] #83 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:33.075 [client] #84 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:34.081 [client] #85 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:35.089 [client] #86 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:36.094 [client] #87 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:37.099 [client] #88 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:53:38.110 [client] #89 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+

@@ -1,0 +1,80 @@
+### Before deletion
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-dq4dh   1/1     Running   0          92s   10.244.0.14   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          92s   10.244.0.15   module6-control-plane   <none>           <none>
+
+$ kubectl get service inventory
+NAME        TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+inventory   ClusterIP   10.96.211.140   <none>        8080/TCP   92s
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=true
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+
+### Delete inventory-6cd7699d6d-dq4dh
+
+$ kubectl delete pod inventory-6cd7699d6d-dq4dh
+pod "inventory-6cd7699d6d-dq4dh" deleted from default namespace
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          93s   10.244.0.15   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-m58p7   0/1     Running   0          1s    10.244.0.17   module6-control-plane   <none>           <none>
+
+$ kubectl rollout status deployment/inventory --timeout=120s
+Waiting for deployment "inventory" rollout to finish: 1 of 2 updated replicas are available...
+deployment "inventory" successfully rolled out
+
+### After: ReplicaSet created a replacement Pod with a new name and IP
+
+$ kubectl get pods -l app=inventory -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          98s   10.244.0.15   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-m58p7   1/1     Running   0          6s    10.244.0.17   module6-control-plane   <none>           <none>
+
+$ kubectl get events --field-selector involvedObject.name=inventory-6cd7699d6d,reason=SuccessfulCreate
+98s         Normal   SuccessfulCreate   replicaset/inventory-6cd7699d6d   Created pod: inventory-6cd7699d6d-dq4dh
+98s         Normal   SuccessfulCreate   replicaset/inventory-6cd7699d6d   Created pod: inventory-6cd7699d6d-fgbl8
+6s          Normal   SuccessfulCreate   replicaset/inventory-6cd7699d6d   Created pod: inventory-6cd7699d6d-m58p7
+
+### Service name and ClusterIP are unchanged; endpoints now point at the new Pod
+
+$ kubectl get service inventory
+NAME        TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+inventory   ClusterIP   10.96.211.140   <none>        8080/TCP   98s
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+inventory-6cd7699d6d-m58p7  ip=10.244.0.17  ready=true
+
+### Client keeps using http://inventory:8080 and now reaches the new Pod (15 s)
+
+$ kubectl logs deployment/client --since=15s
+18:53:45.147 [client] #96 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:46.152 [client] #97 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:47.155 [client] #98 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:48.160 [client] #99 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:49.164 [client] #100 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:49.164 [client] last 10 requests: {'inventory-6cd7699d6d-fgbl8': 5, 'inventory-6cd7699d6d-m58p7': 5}
+18:53:50.170 [client] #101 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:51.175 [client] #102 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:52.179 [client] #103 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:53:53.184 [client] #104 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:54.188 [client] #105 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:55.191 [client] #106 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:56.196 [client] #107 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:57.204 [client] #108 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:58.209 [client] #109 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:59.216 [client] #110 200 served by inventory-6cd7699d6d-m58p7 (10.244.0.17)
+18:53:59.216 [client] last 10 requests: {'inventory-6cd7699d6d-m58p7': 9, 'inventory-6cd7699d6d-fgbl8': 1}
+
+### Client was never restarted and had no failed requests across the deletion (last 40 s)
+
+$ kubectl get pods -l app=client
+NAME                      READY   STATUS    RESTARTS   AGE
+client-6fb44985d9-wfmcf   1/1     Running   0          110s
+
+$ kubectl logs deployment/client --since=40s | grep -c FAILED
+0

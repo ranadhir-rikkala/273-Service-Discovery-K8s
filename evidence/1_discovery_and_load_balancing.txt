@@ -1,0 +1,73 @@
+### 1. Deployment, Pods and Service
+
+$ kubectl get deployment inventory client
+NAME        READY   UP-TO-DATE   AVAILABLE   AGE
+inventory   2/2     2            2           18s
+client      1/1     1            1           15s
+
+$ kubectl get pods -o wide
+NAME                         READY   STATUS    RESTARTS   AGE   IP            NODE                    NOMINATED NODE   READINESS GATES
+client-6fb44985d9-wfmcf      1/1     Running   0          15s   10.244.0.16   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-dq4dh   1/1     Running   0          18s   10.244.0.14   module6-control-plane   <none>           <none>
+inventory-6cd7699d6d-fgbl8   1/1     Running   0          18s   10.244.0.15   module6-control-plane   <none>           <none>
+
+$ kubectl get service inventory
+NAME        TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+inventory   ClusterIP   10.96.211.140   <none>        8080/TCP   18s
+
+$ kubectl get endpointslices -l kubernetes.io/service-name=inventory -o jsonpath=...
+inventory-6cd7699d6d-dq4dh  ip=10.244.0.14  ready=true
+inventory-6cd7699d6d-fgbl8  ip=10.244.0.15  ready=true
+
+### 2. Client resolves the Service name through cluster DNS
+
+$ kubectl exec deployment/client -- python -c import socket; print('inventory ->', socket.gethostbyname('inventory')); print('inventory.default.svc.cluster.local ->', socket.gethostbyname('inventory.default.svc.cluster.local'))
+inventory -> 10.96.211.140
+inventory.default.svc.cluster.local -> 10.96.211.140
+
+$ kubectl get deployment client -o jsonpath={.spec.template.spec.containers[0].env[0]}
+{"name":"INVENTORY_URL","value":"http://inventory:8080/inventory"}
+
+
+### 3. Client requests over 20 seconds are spread across both replicas
+
+$ kubectl logs deployment/client --since=20s
+18:52:25.681 [client] #17 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:26.686 [client] #18 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:27.692 [client] #19 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:28.698 [client] #20 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:28.699 [client] last 10 requests: {'inventory-6cd7699d6d-dq4dh': 5, 'inventory-6cd7699d6d-fgbl8': 5}
+18:52:29.704 [client] #21 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:30.710 [client] #22 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:31.717 [client] #23 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:32.720 [client] #24 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:33.727 [client] #25 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:34.732 [client] #26 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:35.739 [client] #27 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:36.745 [client] #28 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:37.747 [client] #29 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:38.755 [client] #30 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:38.756 [client] last 10 requests: {'inventory-6cd7699d6d-dq4dh': 6, 'inventory-6cd7699d6d-fgbl8': 4}
+18:52:39.761 [client] #31 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:40.765 [client] #32 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:41.771 [client] #33 200 served by inventory-6cd7699d6d-dq4dh (10.244.0.14)
+18:52:42.778 [client] #34 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:43.785 [client] #35 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+18:52:44.791 [client] #36 200 served by inventory-6cd7699d6d-fgbl8 (10.244.0.15)
+
+### 4. Each replica's own log shows it served requests
+
+$ kubectl logs inventory-6cd7699d6d-dq4dh --tail=5
+18:52:35.737 [inventory-6cd7699d6d-dq4dh] served /inventory to 10.244.0.16
+18:52:38.754 [inventory-6cd7699d6d-dq4dh] served /inventory to 10.244.0.16
+18:52:39.760 [inventory-6cd7699d6d-dq4dh] served /inventory to 10.244.0.16
+18:52:40.764 [inventory-6cd7699d6d-dq4dh] served /inventory to 10.244.0.16
+18:52:41.769 [inventory-6cd7699d6d-dq4dh] served /inventory to 10.244.0.16
+
+$ kubectl logs inventory-6cd7699d6d-fgbl8 --tail=5
+18:52:36.743 [inventory-6cd7699d6d-fgbl8] served /inventory to 10.244.0.16
+18:52:37.747 [inventory-6cd7699d6d-fgbl8] served /inventory to 10.244.0.16
+18:52:42.776 [inventory-6cd7699d6d-fgbl8] served /inventory to 10.244.0.16
+18:52:43.784 [inventory-6cd7699d6d-fgbl8] served /inventory to 10.244.0.16
+18:52:44.790 [inventory-6cd7699d6d-fgbl8] served /inventory to 10.244.0.16
+
